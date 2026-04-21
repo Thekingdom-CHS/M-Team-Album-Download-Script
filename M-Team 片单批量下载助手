@@ -1,0 +1,422 @@
+// ==UserScript==
+// @name         M-Team 片单批量下载助手
+// @namespace    https://github.com/Thekingdom-CHS/M-Team-Album-Download-Script
+// @version      1.0.0
+// @description  自动按顺序点击片单详情页中的所有下载按钮，支持进度保存、断点续点，实时显示编号和进度
+// @author       Thekingdom-CHS
+// @match        https://*.m-team.cc/album/*
+// @icon         https://s41.ax1x.com/2026/04/21/pe2e0W4.png
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const STORAGE_START_KEY = 'MT_ALBUM_START_INDEX';
+    const STORAGE_CLICKED_KEY = 'MT_ALBUM_CLICKED_COUNT';
+    const DEFAULT_DELAY_MS = 30000;
+    const BUTTON_SELECTOR = 'button.ant-btn-icon-only.mr-2';
+
+    let isExpanded = false;
+    let panelContainer = null;
+    let floatingIcon = null;
+    let currentStartIndex = 0;
+    let currentClickedCount = 0;
+
+    // ---------- 运行状态控制 ----------
+    let isRunning = false;
+    let shouldStop = false;
+    let isPaused = false;
+
+    // ---------- 存储操作 ----------
+    function loadState() {
+        let start = localStorage.getItem(STORAGE_START_KEY);
+        let clicked = localStorage.getItem(STORAGE_CLICKED_KEY);
+        if (start !== null && clicked !== null) {
+            currentStartIndex = parseInt(start, 10) || 0;
+            currentClickedCount = parseInt(clicked, 10) || 0;
+        } else {
+            const oldProgress = localStorage.getItem('MT_ALBUM_DOWNLOAD_INDEX');
+            if (oldProgress !== null) {
+                const oldIdx = parseInt(oldProgress, 10);
+                if (!isNaN(oldIdx)) {
+                    currentStartIndex = 0;
+                    currentClickedCount = oldIdx;
+                    localStorage.removeItem('MT_ALBUM_DOWNLOAD_INDEX');
+                    saveState();
+                }
+            } else {
+                currentStartIndex = 0;
+                currentClickedCount = 0;
+            }
+        }
+    }
+
+    function saveState() {
+        localStorage.setItem(STORAGE_START_KEY, currentStartIndex);
+        localStorage.setItem(STORAGE_CLICKED_KEY, currentClickedCount);
+    }
+
+    function resetState() {
+        currentStartIndex = 0;
+        currentClickedCount = 0;
+        saveState();
+    }
+
+    function setStartIndex(index) {
+        currentStartIndex = index;
+        currentClickedCount = 0;
+        saveState();
+    }
+
+    function incrementClicked() {
+        currentClickedCount++;
+        saveState();
+    }
+
+    function getNextIndex() {
+        return currentStartIndex + currentClickedCount;
+    }
+
+    function getTotalButtons() {
+        return getAllDownloadButtons().length;
+    }
+
+    function getCurrentNumber() {
+        const total = getTotalButtons();
+        const next = getNextIndex();
+        if (next >= total) return total;
+        return next + 1;
+    }
+
+    function getCompletedCount() {
+        return currentClickedCount;
+    }
+
+    // ---------- 页面序号：放在 <a> 超链接内，作为第一个元素 ----------
+    function addSerialNumbers() {
+        const buttons = getAllDownloadButtons();
+        buttons.forEach((btn, idx) => {
+            let row = btn.closest('tr.ant-table-row');
+            if (!row) return;
+            const link = row.querySelector('td:first-child a[href*="/detail/"]');
+            if (!link) return;
+            if (link.querySelector('.mt-serial-number')) return;
+
+            const serialSpan = document.createElement('span');
+            serialSpan.className = 'mt-serial-number';
+            serialSpan.style.cssText = 'display:inline-block; background:#f6ca60; color:#1e1e1e; border-radius:12px; padding:0 6px; margin-right:8px; font-size:12px; font-weight:bold; min-width:28px; text-align:center; line-height:1.5; vertical-align:3px;';
+            serialSpan.textContent = (idx + 1).toString();
+            link.insertBefore(serialSpan, link.firstChild);
+        });
+    }
+
+    function refreshSerials() {
+        document.querySelectorAll('.mt-serial-number').forEach(el => el.remove());
+        addSerialNumbers();
+    }
+
+    // ---------- 工具 ----------
+    function log(msg, type = 'info') {
+        const prefix = '[MT批量下载]';
+        if (type === 'error') console.error(prefix, msg);
+        else if (type === 'success') console.log(prefix, msg);
+        else console.log(prefix, msg);
+    }
+
+    function getAllDownloadButtons() {
+        return Array.from(document.querySelectorAll(BUTTON_SELECTOR));
+    }
+
+    function highlightButton(btn, index) {
+        if (!btn) return;
+        btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const originalOutline = btn.style.outline;
+        btn.style.outline = '3px solid #f6ca60';
+        btn.style.transition = 'outline 0.1s';
+        setTimeout(() => {
+            btn.style.outline = originalOutline;
+        }, 300);
+        log(`高亮第 ${index + 1} 个按钮`);
+    }
+
+    function getDelay() {
+        const input = document.getElementById('mt-delay-input');
+        if (input && input.value) {
+            const val = parseInt(input.value, 10);
+            return isNaN(val) ? DEFAULT_DELAY_MS : val;
+        }
+        return DEFAULT_DELAY_MS;
+    }
+
+    function updatePanelStats() {
+        if (!isExpanded || !panelContainer) return;
+        const total = getTotalButtons();
+        const completed = getCompletedCount();
+        const currentNum = getCurrentNumber();
+        const statsDiv = panelContainer.querySelector('.mt-stats');
+        if (statsDiv) {
+            statsDiv.innerHTML = `📊 总数: <strong>${total}</strong> &nbsp;| ✅ 已完成: <strong>${completed}</strong> &nbsp;| 🔢 当前编号: <strong>${currentNum}</strong>`;
+        }
+    }
+
+    function updatePauseButtonUI() {
+        const pauseBtn = document.getElementById('mt-pause-btn');
+        if (!pauseBtn) return;
+        if (!isRunning) {
+            pauseBtn.textContent = '⏸ 暂停';
+            pauseBtn.disabled = true;
+            pauseBtn.style.opacity = '0.5';
+            pauseBtn.style.cursor = 'not-allowed';
+        } else {
+            pauseBtn.disabled = false;
+            pauseBtn.style.opacity = '1';
+            pauseBtn.style.cursor = 'pointer';
+            if (isPaused) {
+                pauseBtn.textContent = '▶ 恢复';
+                pauseBtn.style.background = '#52c41a';
+                pauseBtn.style.color = 'white';
+            } else {
+                pauseBtn.textContent = '⏸ 暂停';
+                pauseBtn.style.background = '#f6ca60';
+                pauseBtn.style.color = '#1e1e1e';
+            }
+        }
+    }
+
+    async function stopCurrentTask() {
+        if (!isRunning) return;
+        shouldStop = true;
+        if (isPaused) {
+            isPaused = false;
+            updatePauseButtonUI();
+        }
+        while (isRunning) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        shouldStop = false;
+    }
+
+    async function startClicking() {
+        if (isRunning) {
+            log('已有任务正在运行，请勿重复启动', 'error');
+            return;
+        }
+        isRunning = true;
+        shouldStop = false;
+        isPaused = false;
+        updatePauseButtonUI();
+
+        const delay = getDelay();
+        let nextIdx = getNextIndex();
+        const total = getTotalButtons();
+        if (total === 0) {
+            log('未找到下载按钮，请确认页面已加载完成', 'error');
+            isRunning = false;
+            updatePauseButtonUI();
+            return;
+        }
+        if (nextIdx >= total) {
+            log('所有按钮均已点击完成！', 'success');
+            isRunning = false;
+            updatePauseButtonUI();
+            return;
+        }
+
+        log(`准备点击：起始索引 ${currentStartIndex}，已完成 ${currentClickedCount}，下一个索引 ${nextIdx}（第 ${nextIdx+1} 个），间隔 ${delay}ms`);
+        for (let i = nextIdx; i < total; i++) {
+            if (shouldStop) break;
+            while (isPaused && !shouldStop) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                if (shouldStop) break;
+            }
+            if (shouldStop) break;
+
+            const btn = getAllDownloadButtons()[i];
+            if (!btn) continue;
+
+            updatePanelStats();
+            highlightButton(btn, i);
+            btn.click();
+            log(`已点击第 ${i + 1} / ${total} 个按钮`);
+
+            incrementClicked();
+            updatePanelStats();
+
+            if (i < total - 1) {
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+        isRunning = false;
+        updatePauseButtonUI();
+        if (getNextIndex() >= getTotalButtons() && !shouldStop) {
+            log('全部点击完成！', 'success');
+        }
+    }
+
+    // ---------- UI 组件 ----------
+    function renderCollapsedIcon() {
+        if (floatingIcon) floatingIcon.remove();
+        floatingIcon = document.createElement('div');
+        floatingIcon.innerHTML = `
+            <div style="background:#f6ca60; width:44px; height:44px; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,0.2); transition:transform 0.2s; border:1px solid #fff;">
+                <span style="font-size:22px;"><img src="https://s41.ax1x.com/2026/04/21/pe2e0W4.png"></span>
+            </div>
+        `;
+        floatingIcon.style.position = 'fixed';
+        floatingIcon.style.top = '130px';
+        floatingIcon.style.right = '50px';
+        floatingIcon.style.zIndex = '10000';
+        floatingIcon.addEventListener('click', () => {
+            isExpanded = true;
+            floatingIcon.style.display = 'none';
+            renderExpandedPanel();
+        });
+        document.body.appendChild(floatingIcon);
+    }
+
+    function renderExpandedPanel() {
+        if (!panelContainer) {
+            panelContainer = document.createElement('div');
+            panelContainer.style.position = 'fixed';
+            panelContainer.style.top = '130px';
+            panelContainer.style.right = '50px';
+            panelContainer.style.zIndex = '10000';
+            document.body.appendChild(panelContainer);
+        }
+        const total = getTotalButtons();
+        const completed = getCompletedCount();
+        const currentNum = getCurrentNumber();
+
+        panelContainer.innerHTML = `
+            <div style="background:#ffffff; color:#1e1e1e; padding:14px 18px; border-radius:16px; font-family:system-ui, -apple-system, 'Segoe UI', 'Rubik', sans-serif; font-size:13px; box-shadow:0 4px 20px rgba(0,0,0,0.12); border:1px solid #e5e5e5; min-width:280px;">
+                <div style="font-weight:600; margin-bottom:12px; display:flex; align-items:center; gap:8px; border-bottom:1px solid #f0f0f0; padding-bottom:8px;">
+                    <span style="font-size:18px;"><img src="https://s41.ax1x.com/2026/04/21/pe2e0W4.png"></span> M-team片单批量下载助手
+                    <span style="font-size:11px; background:#f6ca60; color:#1e1e1e; padding:2px 8px; border-radius:20px; font-weight:500;">v1.0.0</span>
+                    <button id="mt-collapse-btn" style="margin-left:auto; background:transparent; border:none; font-size:18px; cursor:pointer; color:#888; padding:0 4px;">✖</button>
+                </div>
+                <div style="margin-bottom:12px; background:#f9f9f9; padding:8px 10px; border-radius:12px;">
+                    <div class="mt-stats">📊 总数: <strong>${total}</strong> &nbsp;| ✅ 已完成: <strong>${completed}</strong> &nbsp;| 🔢 当前编号: <strong>${currentNum}</strong></div>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+                    <button id="mt-resume-btn" style="background:#f6ca60; border:none; padding:6px 14px; border-radius:8px; cursor:pointer; font-weight:600; color:#1e1e1e;">▶ 继续 (断点续点)</button>
+                    <button id="mt-start-over-btn" style="background:#ffffff; border:1px solid #d0d0d0; padding:6px 14px; border-radius:8px; cursor:pointer; font-weight:500;">🔄 从头开始</button>
+                    <button id="mt-pause-btn" style="background:#f6ca60; border:none; padding:6px 14px; border-radius:8px; cursor:pointer; font-weight:600; color:#1e1e1e;">⏸ 暂停</button>
+                    <button id="mt-reset-progress-btn" style="background:#f4f4f4; border:1px solid #ddd; padding:6px 14px; border-radius:8px; cursor:pointer;">🗑 重置进度</button>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+                    <label style="display:inline-flex; align-items:center; gap:6px; background:#f5f5f5; padding:4px 10px; border-radius:20px;">
+                        ⏱️ 间隔(ms):
+                        <input id="mt-delay-input" type="number" value="${DEFAULT_DELAY_MS}" step="200" style="width:75px; background:#fff; border:1px solid #ccc; border-radius:6px; padding:4px 6px;">
+                    </label>
+                    <button id="mt-custom-start-btn" style="background:#e9e9e9; border:1px solid #ccc; padding:6px 14px; border-radius:8px; cursor:pointer;">🔢 从第 N 个开始</button>
+                    <button id="mt-refresh-btn" style="background:#e9e9e9; border:1px solid #ccc; padding:6px 12px; border-radius:8px; cursor:pointer;">⟳ 刷新统计</button>
+                </div>
+                <div style="margin-top:10px; font-size:11px; color:#888; text-align:center; border-top:1px solid #f0f0f0; padding-top:8px;">
+                    💡 点击按钮后自动滚动并高亮当前下载项
+                </div>
+            </div>
+        `;
+
+        document.getElementById('mt-collapse-btn')?.addEventListener('click', () => {
+            isExpanded = false;
+            panelContainer.innerHTML = '';
+            renderCollapsedIcon();
+        });
+        document.getElementById('mt-resume-btn')?.addEventListener('click', async () => {
+            await stopCurrentTask();
+            startClicking();
+        });
+        document.getElementById('mt-start-over-btn')?.addEventListener('click', async () => {
+            if (confirm('确定要从头开始点击吗？之前的进度将被覆盖。')) {
+                await stopCurrentTask();
+                resetState();
+                refreshSerials();
+                updatePanelStats();
+                startClicking();
+            }
+        });
+        document.getElementById('mt-pause-btn')?.addEventListener('click', async () => {
+            if (!isRunning) return;
+            if (isPaused) {
+                isPaused = false;
+                updatePauseButtonUI();
+                log('已恢复点击');
+            } else {
+                isPaused = true;
+                updatePauseButtonUI();
+                log('已暂停点击');
+            }
+        });
+        document.getElementById('mt-reset-progress-btn')?.addEventListener('click', () => {
+            if (confirm('重置进度仅清除记录，不会影响已经点击过的按钮。确定重置？')) {
+                resetState();
+                updatePanelStats();
+                log('进度已重置');
+            }
+        });
+        document.getElementById('mt-custom-start-btn')?.addEventListener('click', async () => {
+            const total = getTotalButtons();
+            let raw = prompt(`请输入起始序号（1 ～ ${total}）`, "1");
+            if (raw === null) return;
+            let startIdx = parseInt(raw, 10) - 1;
+            if (isNaN(startIdx)) startIdx = 0;
+            if (startIdx < 0) startIdx = 0;
+            if (startIdx >= total) {
+                alert(`序号超出范围，最大为 ${total}`);
+                return;
+            }
+            if (confirm(`从第 ${startIdx+1} 个开始点击，之前的进度将被覆盖。确定吗？`)) {
+                await stopCurrentTask();
+                setStartIndex(startIdx);
+                refreshSerials();
+                updatePanelStats();
+                startClicking();
+            }
+        });
+        document.getElementById('mt-refresh-btn')?.addEventListener('click', () => {
+            refreshSerials();
+            updatePanelStats();
+            log('已刷新按钮统计和序号', 'success');
+        });
+
+        updatePauseButtonUI();
+    }
+
+    function init() {
+        loadState();
+        addSerialNumbers();
+        if (panelContainer) panelContainer.remove();
+        if (floatingIcon) floatingIcon.remove();
+        panelContainer = null;
+        floatingIcon = null;
+        isExpanded = false;
+        renderCollapsedIcon();
+        log('脚本已加载，点击右上角小图标展开批量下载面板', 'success');
+    }
+
+    function waitForButtons() {
+        return new Promise(resolve => {
+            if (document.querySelector(BUTTON_SELECTOR)) {
+                resolve();
+            } else {
+                const observer = new MutationObserver((mutations, obs) => {
+                    if (document.querySelector(BUTTON_SELECTOR)) {
+                        obs.disconnect();
+                        resolve();
+                    }
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+                setTimeout(() => {
+                    observer.disconnect();
+                    resolve();
+                }, 5000);
+            }
+        });
+    }
+
+    waitForButtons().then(() => {
+        init();
+    });
+})();
