@@ -45,10 +45,10 @@
 
 ## 📸 界面预览
 
-> *折叠图标（右上角）*  
-> [![pe2ejfg.png](https://s41.ax1x.com/2026/04/21/pe2ejfg.png)](https://imgchr.com/i/pe2ejfg)
+> *折叠图标（右上角）*
+> ![折叠](https://s41.ax1x.com/2026/04/21/pe2ejfg.png)
 > *展开面板*  
-> [![pe2ezlj.png](https://s41.ax1x.com/2026/04/21/pe2ezlj.png)](https://imgchr.com/i/pe2ezlj)
+> ![展开](https://s41.ax1x.com/2026/04/21/pe2ezlj.png)
 
 ## ⚠️ 注意事项
 
